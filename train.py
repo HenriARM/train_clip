@@ -8,6 +8,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import clip
 from PIL import Image
+from tqdm import tqdm
+import numpy as np
 
 
 class CustomDataset(Dataset):
@@ -51,7 +53,7 @@ def main():
     model, preprocess = clip.load("ViT-B/32", device=device, jit=False)
     print(preprocess)
 
-    batch_size = 8  # must be larger than 1
+    batch_size = 16  # must be larger than 1
     epochs = 100
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -72,61 +74,88 @@ def main():
         model.parameters(), lr=5e-5, betas=(0.9, 0.98), eps=1e-6, weight_decay=0.2
     )
 
+    metrics = {}
+    for stage in ["train", "test"]:
+        for metric in ["loss"]:
+            metrics[f"{stage}_{metric}"] = []
+
+
     for epoch in range(epochs):
         model = model.train()
 
-        for batch in train_dataloader:
-            optimizer.zero_grad()
-            image1, image2 = batch
+        for dataloader in [train_dataloader, test_dataloader]:
+            metrics_epoch = {key: [] for key in metrics.keys()}
+            stage = "train"
+            model = model.train()
+            torch.set_grad_enabled(True)
 
-            image1 = image1.to(device)
-            image2 = image2.to(device)
+            if dataloader == test_dataloader:
+                stage = "test"
+                model = model.eval()
+                torch.set_grad_enabled(False)
 
-            # forward
-            image1_features = model.encode_image(image1)
-            image2_features = model.encode_image(image2)
+            for _, batch in enumerate(tqdm(dataloader)):
+                image1, image2 = batch
+                image1 = image1.to(device)
+                image2 = image2.to(device)
 
-            # normalized features
-            image1_features = image1_features / image1_features.norm(
-                dim=1, keepdim=True
-            )
-            image2_features = image2_features / image2_features.norm(
-                dim=1, keepdim=True
-            )
+                # forward
+                image1_features = model.encode_image(image1)
+                image2_features = model.encode_image(image2)
 
-            # cosine similarity as logits
-            logit_scale = model.logit_scale.exp()
-            logits_image1 = logit_scale * image1_features @ image2_features.t()
-            logits_image2 = logits_image1.t()
+                # normalized features
+                image1_features = image1_features / image1_features.norm(
+                    dim=1, keepdim=True
+                )
+                image2_features = image2_features / image2_features.norm(
+                    dim=1, keepdim=True
+                )
 
-            ground_truth = torch.arange(len(image1), dtype=torch.long, device=device)
-            total_loss = (loss(logits_image1, ground_truth) + loss(logits_image2, ground_truth)) / 2
-            total_loss.backward()
-            print(total_loss)
-            if device == "cpu":
-                optimizer.step()
-            else:
-                # convert model fp16 -> fp32 before updating weights
-                convert_models_to_fp32(model)
-                optimizer.step()
-                # back fp32 -> fp16 https://github.com/openai/CLIP/blob/main/clip/model.py#L375
-                clip.model.convert_weights(model)
+                # cosine similarity as logits
+                logit_scale = model.logit_scale.exp()
+                logits_image1 = logit_scale * image1_features @ image2_features.t()
+                logits_image2 = logits_image1.t()
+
+                ground_truth = torch.arange(len(image1), dtype=torch.long, device=device)
+                total_loss = (loss(logits_image1, ground_truth) + loss(logits_image2, ground_truth)) / 2
+
+                metrics_epoch[f'{stage}_loss'].append(total_loss.cpu().item())  # Tensor(0.1) => 0.1f
+
+                if dataloader == train_dataloader:
+                    total_loss.backward()
+                    if device == "cpu":
+                        optimizer.step()        
+                    else:
+                        # convert model fp16 -> fp32 before updating weights
+                        convert_models_to_fp32(model)
+                        optimizer.step()
+                        # back fp32 -> fp16 https://github.com/openai/CLIP/blob/main/clip/model.py#L375
+                        clip.model.convert_weights(model)
+                    optimizer.zero_grad()
+
+            metrics_strs = []
+            for key in metrics_epoch.keys():
+                if stage in key:
+                    value = np.mean(metrics_epoch[key])
+                    metrics[key].append(value)
+                    metrics_strs.append(f'{key}: {round(value, 2)}')
+
+            print(f'epoch: {epoch} {" ".join(metrics_strs)}')
+
+            # # taken from https://github.com/openai/CLIP/issues/83
+            # torch.save({
+            #     'epoch': epoch,
+            #     'model_state_dict': model.state_dict(),
+            #     'optimizer_state_dict': optimizer.state_dict(),
+            #     'loss': total_loss,
+            # }, f"model_10.pt")
             
-            # taken from https://github.com/openai/CLIP/issues/83
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': total_loss,
-            }, f"model_10.pt")
-
 
 if __name__ == "__main__":
     main()
 
 
 # TODO: use AdamW optimizer
-# TODO: increase input resolution of backbones (CLIP ResNet version is modified and has ViT at the end)
 # TODO:
 # Gradient Checkpointing
 # Filter out bias from weight decay
@@ -145,4 +174,12 @@ Compose(
     ToTensor()
     Normalize(mean=(0.48145466, 0.4578275, 0.40821073), std=(0.26862954, 0.26130258, 0.27577711))
 )
+"""
+
+
+"""
+changes for higher input
+
+model.py
+clip.py
 """
