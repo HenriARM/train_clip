@@ -10,6 +10,7 @@ import clip
 from PIL import Image
 from tqdm import tqdm
 import numpy as np
+import clearml
 
 
 class CustomDataset(Dataset):
@@ -44,6 +45,7 @@ def convert_models_to_fp32(model):
 
 
 def main():
+    task = clearml.Task.init(task_name="test", project_name="neuralp")
     data_csv = "data_3000.csv"
     # if using GPU then use mixed precision training.
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -141,6 +143,9 @@ def main():
                     metrics_strs.append(f'{key}: {round(value, 2)}')
 
             print(f'epoch: {epoch} {" ".join(metrics_strs)}')
+        
+        task.get_logger().report_scalar("loss", "train", iteration=epoch, value=metrics["train_loss"][-1])
+        task.get_logger().report_scalar("loss", "test", iteration=epoch, value=metrics["test_loss"][-1])
 
             # # taken from https://github.com/openai/CLIP/issues/83
             # torch.save({
