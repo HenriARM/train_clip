@@ -44,6 +44,31 @@ def convert_models_to_fp32(model):
             p.grad.data = p.grad.data.float()
 
 
+# https://github.com/mlfoundations/open_clip/blob/main/src/training/scheduler.py
+def _warmup_lr(base_lr, warmup_length, step):
+    return base_lr * (step + 1) / warmup_length
+
+
+def assign_learning_rate(optimizer, new_lr):
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = new_lr
+
+
+def cosine_lr(optimizer, base_lr, warmup_length, steps):
+    def _lr_adjuster(step):
+        if step < warmup_length:
+            lr = _warmup_lr(base_lr, warmup_length, step)
+        else:
+            e = step - warmup_length
+            es = steps - warmup_length
+            lr = 0.5 * (1 + np.cos(np.pi * e / es)) * base_lr
+        assign_learning_rate(optimizer, lr)
+        return lr
+
+    return _lr_adjuster
+
+
+
 def main():
     task = clearml.Task.init(task_name="test", project_name="neuralp")
     data_csv = "data_3000.csv"
@@ -56,7 +81,7 @@ def main():
     print(preprocess)
 
     batch_size = 16  # must be larger than 1
-    epochs = 100
+    epochs = 1000
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     train_dataset = CustomDataset(data_csv, train=True, transform=preprocess)
@@ -71,10 +96,14 @@ def main():
 
     loss = nn.CrossEntropyLoss()
     # params used from paper (page 48 https://arxiv.org/pdf/2103.00020.pdf)
-    # try eps 1e-8
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=5e-5, betas=(0.9, 0.98), eps=1e-6, weight_decay=0.2
+    lr=5e-4
+    warmup = 2000
+    optimizer = torch.optim.AdamW(  
+        model.parameters(), lr=lr, betas=(0.9, 0.98), eps=1e-8, weight_decay=0.2
     )
+
+    total_steps = len(train_dataloader) * epochs
+    scheduler = cosine_lr(optimizer, lr, warmup, total_steps)
 
     metrics = {}
     for stage in ["train", "test"]:
@@ -96,7 +125,13 @@ def main():
                 model = model.eval()
                 torch.set_grad_enabled(False)
 
-            for _, batch in enumerate(tqdm(dataloader)):
+            for i, batch in enumerate(tqdm(dataloader)):
+                # taken from https://github.com/mlfoundations/open_clip/blob/main/src/training/train.py
+                # https://github.com/mlfoundations/wise-ft/blob/master/src/models/finetune.py
+                if dataloader == train_dataloader:
+                    step = len(dataloader) * epoch + i
+                    scheduler(step)
+
                 image1, image2 = batch
                 image1 = image1.to(device)
                 image2 = image2.to(device)
@@ -174,13 +209,10 @@ if __name__ == "__main__":
     main()
 
 
-# TODO: use AdamW optimizer
 # TODO:
 # Gradient Checkpointing
 # Filter out bias from weight decay
-# Decaying learning rate with cosine schedule
 # Half-precision Adam statistics
-# Half-precision stochastically rounded text encoder weights were used
 
 
 """
