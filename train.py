@@ -78,7 +78,7 @@ def main():
 
     metrics = {}
     for stage in ["train", "test"]:
-        for metric in ["loss"]:
+        for metric in ["loss", "sim_dist", "nonsim_dist"]:
             metrics[f"{stage}_{metric}"] = []
 
 
@@ -117,12 +117,20 @@ def main():
                 logit_scale = model.logit_scale.exp()
                 logits_image1 = logit_scale * image1_features @ image2_features.t()
                 logits_image2 = logits_image1.t()
-
                 ground_truth = torch.arange(len(image1), dtype=torch.long, device=device)
                 total_loss = (loss(logits_image1, ground_truth) + loss(logits_image2, ground_truth)) / 2
 
                 metrics_epoch[f'{stage}_loss'].append(total_loss.cpu().item())  # Tensor(0.1) => 0.1f
 
+                # store mean cosine similarity between similar and non-similar images
+                sim_dist = logits_image1.diagonal().mean()
+                logits_image1.fill_diagonal_(0)
+                nonsim_dist = logits_image1.sum() / (logits_image1.shape[0]**2 - logits_image1.shape[0])
+
+                metrics_epoch[f'{stage}_sim_dist'].append(sim_dist.cpu().item())
+                metrics_epoch[f'{stage}_nonsim_dist'].append(nonsim_dist.cpu().item())
+
+                # backward
                 if dataloader == train_dataloader:
                     total_loss.backward()
                     if device == "cpu":
@@ -146,6 +154,12 @@ def main():
         
         task.get_logger().report_scalar("loss", "train", iteration=epoch, value=metrics["train_loss"][-1])
         task.get_logger().report_scalar("loss", "test", iteration=epoch, value=metrics["test_loss"][-1])
+
+        task.get_logger().report_scalar("train data mean cosine similarity", "similar images", iteration=epoch, value=metrics["train_sim_dist"][-1])
+        task.get_logger().report_scalar("train data mean cosine similarity", "non-similar images", iteration=epoch, value=metrics["train_nonsim_dist"][-1])
+
+        task.get_logger().report_scalar("test data mean cosine similarity", "similar images", iteration=epoch, value=metrics["test_sim_dist"][-1])
+        task.get_logger().report_scalar("test data mean cosine similarity", "non-similar images", iteration=epoch, value=metrics["test_nonsim_dist"][-1])
 
             # # taken from https://github.com/openai/CLIP/issues/83
             # torch.save({
